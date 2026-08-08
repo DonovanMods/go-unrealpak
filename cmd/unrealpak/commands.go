@@ -5,10 +5,42 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/DonovanMods/go-unrealpak"
 )
+
+// parseArgs parses args against fs and returns the positional arguments,
+// tolerating flags that appear after them.
+//
+// Go's flag package stops parsing at the first non-flag argument, but the
+// documented usage puts flags last (`unrealpak extract <pak> <dir> --filter
+// '*.json'`), which is what users of tar and friends expect. So parse in a
+// loop: each time the parse stops on a positional, set it aside and resume
+// on the remainder. Flag values already parsed persist across calls.
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		// A literal "--" ends flag parsing for good: everything after it is
+		// positional even if it looks like a flag.
+		if len(args) > len(rest) && args[len(args)-len(rest)-1] == "--" {
+			return append(positional, rest...), nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
+}
 
 // openPak opens path, wrapping the error with the path so a failure names
 // the file the user actually passed.
@@ -32,13 +64,14 @@ func sortedFiles(r *unrealpak.Reader) []unrealpak.FileEntry {
 func cmdInfo(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("info", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
+	pos, err := parseArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
+	if len(pos) != 1 {
 		return fmt.Errorf("info takes exactly one pak path")
 	}
-	r, err := openPak(fs.Arg(0))
+	r, err := openPak(pos[0])
 	if err != nil {
 		return err
 	}
@@ -71,13 +104,14 @@ func cmdList(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	asJSON := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	pos, err := parseArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
+	if len(pos) != 1 {
 		return fmt.Errorf("list takes exactly one pak path")
 	}
-	r, err := openPak(fs.Arg(0))
+	r, err := openPak(pos[0])
 	if err != nil {
 		return err
 	}
@@ -96,5 +130,105 @@ func cmdList(args []string, out io.Writer) error {
 	for _, f := range files {
 		fmt.Fprintf(out, "%10d  %s\n", f.Size, f.Path)
 	}
+	return nil
+}
+
+func cmdCat(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("cat", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 2 {
+		return fmt.Errorf("cat takes a pak path and an entry path")
+	}
+	r, err := openPak(pos[0])
+	if err != nil {
+		return err
+	}
+	defer r.Close() //nolint:errcheck
+
+	data, err := r.ReadFile(pos[1])
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", pos[1], err)
+	}
+	_, err = out.Write(data)
+	return err
+}
+
+// checkExtractPath refuses an entry path that would write outside dir. Pak
+// entry paths are attacker-controlled in any archive the user did not build
+// themselves, so this is the extract-side equivalent of a zip-slip guard.
+func checkExtractPath(dir, entryPath string) error {
+	if filepath.IsAbs(entryPath) || strings.HasPrefix(entryPath, "/") {
+		return fmt.Errorf("entry %q: absolute paths are not allowed", entryPath)
+	}
+	target := filepath.Join(dir, filepath.FromSlash(entryPath))
+	rel, err := filepath.Rel(dir, target)
+	if err != nil {
+		return fmt.Errorf("entry %q: %w", entryPath, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("entry %q: escapes the output directory", entryPath)
+	}
+	return nil
+}
+
+func cmdExtract(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("extract", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	filter := fs.String("filter", "", "only extract entries whose path matches this glob")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 2 {
+		return fmt.Errorf("extract takes a pak path and an output directory")
+	}
+	pakPath, dir := pos[0], pos[1]
+
+	r, err := openPak(pakPath)
+	if err != nil {
+		return err
+	}
+	defer r.Close() //nolint:errcheck
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	count := 0
+	for _, f := range sortedFiles(r) {
+		if *filter != "" {
+			ok, err := path.Match(*filter, f.Path)
+			if err != nil {
+				return fmt.Errorf("bad --filter pattern %q: %w", *filter, err)
+			}
+			if !ok {
+				continue
+			}
+		}
+		if err := checkExtractPath(dir, f.Path); err != nil {
+			return err
+		}
+		data, err := r.ReadFile(f.Path)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", f.Path, err)
+		}
+		target := filepath.Join(dir, filepath.FromSlash(f.Path))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			return err
+		}
+		count++
+	}
+
+	if err := writeSidecar(dir, r.MountPoint()); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "extracted %d entries to %s (mount point recorded in %s)\n", count, dir, sidecarName)
 	return nil
 }
