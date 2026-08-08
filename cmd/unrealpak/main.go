@@ -42,6 +42,8 @@ func run(args []string, out io.Writer) error {
 		return cmdCat(args[1:], out)
 	case "extract":
 		return cmdExtract(args[1:], out)
+	case "build":
+		return cmdBuild(args[1:], out)
 	case "help", "-h", "--help":
 		fmt.Fprint(out, usage)
 		return nil

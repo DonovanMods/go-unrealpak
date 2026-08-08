@@ -245,3 +245,129 @@ func TestRun_Extract_RefusesPathEscape(t *testing.T) {
 		t.Errorf("an ordinary nested path must be allowed; got %v", err)
 	}
 }
+
+func TestRun_Build_ProducesAReadablePakWithTheGivenMount(t *testing.T) {
+	src := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "a", "first.json"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outPak := filepath.Join(t.TempDir(), "built.pak")
+
+	var out bytes.Buffer
+	if err := run([]string{"build", src, outPak, "--mount", "../../../Game/Content/"}, &out); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	r, err := unrealpak.Open(outPak)
+	if err != nil {
+		t.Fatalf("built pak is not readable: %v", err)
+	}
+	defer r.Close()
+	if r.MountPoint() != "../../../Game/Content/" {
+		t.Errorf("MountPoint = %q", r.MountPoint())
+	}
+	data, err := r.ReadFile("a/first.json")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "1" {
+		t.Errorf("entry = %q", data)
+	}
+}
+
+// The sidecar exists so a plain extract->build cycle needs no flags at all.
+func TestRun_Build_DefaultsMountFromSidecar(t *testing.T) {
+	pak := writeFixturePak(t, "../../../Game/Content/", map[string][]byte{
+		"a/first.json":  []byte("1"),
+		"b/second.json": []byte("22"),
+	})
+	dir := t.TempDir()
+	rebuilt := filepath.Join(t.TempDir(), "rebuilt.pak")
+
+	var out bytes.Buffer
+	if err := run([]string{"extract", pak, dir}, &out); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if err := run([]string{"build", dir, rebuilt}, &out); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	orig, err := unrealpak.Open(pak)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer orig.Close()
+	round, err := unrealpak.Open(rebuilt)
+	if err != nil {
+		t.Fatalf("round-tripped pak is not readable: %v", err)
+	}
+	defer round.Close()
+
+	if orig.MountPoint() != round.MountPoint() {
+		t.Errorf("mount point drifted: %q -> %q", orig.MountPoint(), round.MountPoint())
+	}
+	if len(orig.Files()) != len(round.Files()) {
+		t.Fatalf("entry count drifted: %d -> %d", len(orig.Files()), len(round.Files()))
+	}
+	for _, f := range orig.Files() {
+		want, err := orig.ReadFile(f.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := round.ReadFile(f.Path)
+		if err != nil {
+			t.Errorf("round-tripped pak missing %s: %v", f.Path, err)
+			continue
+		}
+		if !bytes.Equal(want, got) {
+			t.Errorf("%s: content drifted", f.Path)
+		}
+	}
+}
+
+// The sidecar must never end up inside the pak it describes.
+func TestRun_Build_ExcludesTheSidecar(t *testing.T) {
+	pak := writeFixturePak(t, "../../../Game/Content/", map[string][]byte{
+		"a/first.json": []byte("1"),
+	})
+	dir := t.TempDir()
+	rebuilt := filepath.Join(t.TempDir(), "rebuilt.pak")
+
+	var out bytes.Buffer
+	if err := run([]string{"extract", pak, dir}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"build", dir, rebuilt}, &out); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := unrealpak.Open(rebuilt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	for _, f := range r.Files() {
+		if f.Path == sidecarName {
+			t.Error("the sidecar must not be packed into the pak")
+		}
+	}
+}
+
+func TestRun_Build_NoMountAndNoSidecar_Errors(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "only.json"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := run([]string{"build", src, filepath.Join(t.TempDir(), "x.pak")}, &out)
+	if err == nil {
+		t.Fatal("build with no --mount and no sidecar must fail loudly, not guess a default")
+	}
+	if !strings.Contains(err.Error(), "--mount") {
+		t.Errorf("error should tell the user how to fix it; got %v", err)
+	}
+}

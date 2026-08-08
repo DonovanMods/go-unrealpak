@@ -232,3 +232,85 @@ func cmdExtract(args []string, out io.Writer) error {
 	fmt.Fprintf(out, "extracted %d entries to %s (mount point recorded in %s)\n", count, dir, sidecarName)
 	return nil
 }
+
+func cmdBuild(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("build", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mount := fs.String("mount", "", "mount point to record in the built pak")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 2 {
+		return fmt.Errorf("build takes an input directory and an output pak path")
+	}
+	dir, pakPath := pos[0], pos[1]
+
+	// An explicit --mount always wins; the sidecar is only a convenience for
+	// the extract->build cycle. Neither present is a hard error: guessing a
+	// mount point produces a pak that loads and silently does nothing.
+	mountPoint := *mount
+	if mountPoint == "" {
+		recorded, err := readSidecar(dir)
+		if err != nil {
+			return fmt.Errorf("no --mount given and no usable %s in %s: %w "+
+				"(pass --mount <mountpoint>)", sidecarName, dir, err)
+		}
+		mountPoint = recorded
+	}
+
+	// os.DirEntry, not fs.DirEntry: the flag.FlagSet above is bound to `fs`,
+	// so naming the io/fs package here would be shadowed. os.DirEntry is an
+	// alias for the same type, so this needs no extra import at all.
+	var entries []string
+	err = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == sidecarName {
+			return nil // metadata about the pak, never content of it
+		}
+		entries = append(entries, rel)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("walking %s: %w", dir, err)
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("%s contains no files to pack", dir)
+	}
+	sort.Strings(entries)
+
+	w, err := unrealpak.Create(pakPath, unrealpak.WithMountPoint(mountPoint))
+	if err != nil {
+		return fmt.Errorf("creating %s: %w", pakPath, err)
+	}
+	for _, rel := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil {
+			w.Close()          //nolint:errcheck
+			os.Remove(pakPath) //nolint:errcheck
+			return err
+		}
+		if err := w.AddFile(rel, data); err != nil {
+			w.Close()          //nolint:errcheck
+			os.Remove(pakPath) //nolint:errcheck
+			return fmt.Errorf("adding %s: %w", rel, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		os.Remove(pakPath) //nolint:errcheck
+		return fmt.Errorf("finalizing %s: %w", pakPath, err)
+	}
+
+	fmt.Fprintf(out, "built %s: %d entries, mount point %s\n", pakPath, len(entries), mountPoint)
+	return nil
+}
