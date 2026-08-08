@@ -22,7 +22,7 @@ const magic uint32 = 0x5A6F12E1
 // IndexOffset(8)+IndexSize(8)+IndexHash(20)+CompressionMethods(5x32) = 221.
 // Note EncryptionKeyGuid and bEncryptedIndex precede Magic — not after
 // IndexHash, as some public docs describe. Confirmed on all 34 paks in a real
-// Icarus install (Task 1); see docs/plans/icarus-pak-format-findings.md.
+// Icarus install; see docs/format.md.
 const footerSize = 221
 
 // minVersion is the oldest pak version this package reads. Version 10
@@ -85,7 +85,7 @@ type FileEntry struct {
 // This recipe was not guessed: it was recovered by brute-forcing seed/
 // encoding/case/prefix combinations until computed hashes matched stored keys,
 // then verified against all 173,078 entries across all 34 paks in a real
-// install. See docs/plans/icarus-pak-format-findings.md.
+// install. See docs/format.md.
 //
 // strings.ToLower is full-Unicode where UE's FChar::ToLower is not, but no
 // non-ASCII path exists in any shipped Icarus pak and this package controls
@@ -109,9 +109,8 @@ func hashPath(mountRelative string, seed uint64) uint64 {
 // when the caller doesn't override it via WithMountPoint. It is the bare
 // UE4 convention ("../../../", relative to <UProject>/Binaries/Win64/"),
 // deliberately game-agnostic — this package has no opinion on any specific
-// game's directory layout. A caller writing paks for a real game (see
-// internal/source/icarus's Writer usage, #178) supplies the mount point its
-// own game's mod loader actually expects.
+// game's directory layout. A caller writing paks for a real game supplies the
+// mount point that game's mod loader actually expects.
 const defaultMountPoint = "../../../"
 
 // writeFString writes a length-prefixed ANSI Unreal FString (length includes

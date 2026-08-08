@@ -240,7 +240,7 @@ func compressedHeaderSize(blocks int) int64 {
 //
 // This procedure was validated by reconstructing all 298 tables of the real
 // Icarus data.pak — 40 stored plus 258 Zlib — byte-for-byte.
-// See docs/plans/icarus-quickbms-spike-findings.md.
+// See docs/format.md.
 func (r *Reader) readZlib(path string, e readerEntry) ([]byte, error) {
 	if e.blocks <= 0 {
 		return nil, fmt.Errorf("unrealpak: %s: %w: compressed entry declares %d compression blocks",
@@ -495,7 +495,7 @@ func parseDirectoryIndex(dir, encoded []byte) ([]readerEntry, error) {
 //
 // The block-size-before-Offset ordering is easy to get wrong; it was pinned
 // down empirically and this decoder reproduces all 173,078 records across a
-// real install exactly. See docs/plans/icarus-pak-format-findings.md.
+// real install exactly. See docs/format.md.
 func decodeEntry(b []byte, at int) (readerEntry, error) {
 	c := &cursor{b: b, pos: at}
 	flags := c.u32()

@@ -48,9 +48,8 @@ type Option func(*Writer)
 // WithMountPoint overrides the mount point Writer stamps into the primary
 // index (see defaultMountPoint). This package stays game-agnostic — it has
 // no built-in notion of any specific game's directory layout — so a caller
-// that knows what its target game's mod loader expects (e.g.
-// internal/source/icarus, #178) supplies it here rather than this package
-// guessing or hard-coding one game's convention.
+// that knows what its target game's mod loader expects supplies it here,
+// rather than this package guessing or hard-coding one game's convention.
 func WithMountPoint(mountPoint string) Option {
 	return func(w *Writer) { w.mountPoint = mountPoint }
 }
